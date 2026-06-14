@@ -1,0 +1,10 @@
+node_modules/
+config.json
+profiles.json
+automation-config.json
+reports/
+data/
+profiles/
+*.log
+.env
+.env.*
