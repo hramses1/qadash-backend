@@ -67,7 +67,13 @@ router.post('/install', async (req, res) => {
   installing = true;
   res.json({ started: true });
 
-  installAutomation(io, repoUrl, installPath).finally(() => { installing = false; });
+  installAutomation(io, repoUrl, installPath)
+    .catch(err => {
+      // Red de seguridad: cualquier error no controlado siempre llega al usuario
+      io.emit('automation:log', { message: err.message, type: 'error' });
+      io.emit('automation:failed', { error: err.message });
+    })
+    .finally(() => { installing = false; });
 });
 
 router.post('/update', async (req, res) => {
@@ -143,6 +149,47 @@ router.post('/update', async (req, res) => {
     emit(err.message, 'error');
     io.emit('automation:update-failed', { error: err.message });
   });
+});
+
+// Lista las ramas remotas reales del repositorio clonado (git branch -r).
+router.get('/branches', (req, res) => {
+  const installPath = req.query.installPath;
+  if (!installPath || installPath.includes('..')) {
+    return res.status(400).json({ error: 'installPath inválido' });
+  }
+  if (!fs.existsSync(path.join(installPath, '.git'))) {
+    return res.status(400).json({ error: 'No es un repositorio git válido.' });
+  }
+
+  const opts = {
+    shell: process.platform === 'win32',
+    cwd: installPath,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  };
+  const proc = spawn('git', ['branch', '-r', '--format=%(refname:short)'], opts);
+
+  let out = '', err = '', done = false;
+  const finish = (fn) => { if (!done) { done = true; clearTimeout(timer); fn(); } };
+  const timer = setTimeout(() => {
+    try { proc.kill(); } catch {}
+    finish(() => res.status(504).json({ error: 'Tiempo agotado listando ramas' }));
+  }, 15000);
+
+  proc.stdout.on('data', d => out += d.toString());
+  proc.stderr.on('data', d => err += d.toString());
+  proc.on('close', code => finish(() => {
+    if (code !== 0) return res.status(500).json({ error: err.trim() || 'git branch falló' });
+    const branches = [...new Set(
+      out.split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)
+        .filter(l => !l.includes('->'))        // excluye 'origin/HEAD -> origin/main'
+        .map(l => l.replace(/^origin\//, ''))  // origin/main -> main
+        .filter(b => b && b !== 'HEAD')
+    )];
+    res.json({ branches });
+  }));
+  proc.on('error', e => finish(() => res.status(500).json({ error: e.message })));
 });
 
 router.get('/status', (req, res) => {
