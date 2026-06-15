@@ -3,6 +3,7 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 const { checkAll, installAutomation } = require('../services/automationInstaller');
+const { resetProjectData, samePath } = require('../services/projectData');
 const { spawn } = require('child_process');
 
 const AUTO_CONFIG_PATH = path.join(__dirname, '..', 'automation-config.json');
@@ -228,10 +229,20 @@ router.post('/apply', (req, res) => {
   try {
     const { projectPath, pytestCmd } = req.body;
     const config = readConfig();
+
+    const prevProjectPath = config.projectPath || '';
+    const projectChanged = !samePath(prevProjectPath, projectPath);
+
     config.projectPath = projectPath;
     config.pytestCmd = pytestCmd;
     writeConfig(config);
-    res.json({ success: true });
+
+    let reset = null;
+    if (projectChanged && prevProjectPath) {
+      reset = resetProjectData();
+    }
+
+    res.json({ success: true, projectChanged, reset });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

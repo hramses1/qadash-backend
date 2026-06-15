@@ -3,6 +3,7 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { resetProjectData, samePath } = require('../services/projectData');
 
 function openNativeDialog(type, startPath) {
   return new Promise((resolve) => {
@@ -90,9 +91,22 @@ router.get('/', (req, res) => {
 router.post('/', (req, res) => {
   try {
     const { projectPath, envPath, pytestCmd } = req.body;
+
+    // Detectar cambio de proyecto ANTES de sobrescribir config
+    let prevProjectPath = '';
+    try { prevProjectPath = readConfig().projectPath || ''; } catch {}
+    const projectChanged = !samePath(prevProjectPath, projectPath);
+
     const updated = { projectPath, envPath, pytestCmd: pytestCmd || 'pytest' };
     writeConfig(updated);
-    res.json({ success: true, config: updated });
+
+    // Proyecto distinto → reiniciar analítica/historial (pertenecen al anterior)
+    let reset = null;
+    if (projectChanged && prevProjectPath) {
+      reset = resetProjectData();
+    }
+
+    res.json({ success: true, config: updated, projectChanged, reset });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
