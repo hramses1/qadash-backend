@@ -99,13 +99,33 @@ function getRemoteOrigin(repoPath) {
   }
 }
 
+// Docker: binario + daemon. Distingue "no instalado" de "instalado pero
+// Docker Desktop apagado" (este último es accionable → botón para arrancarlo).
+function checkDocker() {
+  let version = null;
+  try {
+    const out = execSync('docker --version', { encoding: 'utf-8', stdio: 'pipe' });
+    const m = (out + '').match(/Docker version ([\d.]+)/);
+    version = m ? m[1] : 'instalado';
+  } catch {
+    return { ok: false, installed: false, daemonRunning: false, error: 'Docker no encontrado. Instala Docker Desktop.' };
+  }
+  try {
+    execSync('docker info --format "{{.ServerVersion}}"', { encoding: 'utf-8', stdio: 'pipe' });
+    return { ok: true, installed: true, daemonRunning: true, version };
+  } catch {
+    return { ok: false, installed: true, daemonRunning: false, version, error: 'Docker instalado, pero Docker Desktop no está corriendo. Ábrelo.' };
+  }
+}
+
 function checkAll() {
   const python = checkPython();
   const git = checkGit();
   const venv = python.ok
     ? checkVirtualenv(python.cmd)
     : { ok: false, error: 'Requiere Python primero' };
-  return { python, git, venv };
+  const docker = checkDocker();
+  return { python, git, venv, docker };
 }
 
 // Con shell:true en Windows los argumentos se re-parsean por cmd.exe; las rutas
