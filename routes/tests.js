@@ -6,6 +6,7 @@ const { collectTests } = require('../services/testCollector');
 const { runTests, abortExecution, isRunning } = require('../services/pytestRunner');
 const { readEnv } = require('../services/envManager');
 const { getProfile } = require('../services/profileManager');
+const { ensureGrid } = require('../services/dockerRunner');
 
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 
@@ -66,12 +67,28 @@ router.get('/collect', async (req, res) => {
 router.post('/run', async (req, res) => {
   try {
     if (isRunning()) return res.status(409).json({ error: 'Execution already in progress' });
-    const { testIds, profileName, envFile } = req.body;
+    const { testIds, profileName, envFile, useDocker } = req.body;
     if (!testIds || !testIds.length) return res.status(400).json({ error: 'No tests selected' });
-    const { projectPath, pytestCmd } = getConfig();
+    const { projectPath, pytestCmd, seleniumRemoteUrl } = getConfig();
     if (!projectPath) return res.status(400).json({ error: 'Project path not configured' });
     const envVars = resolveEnvVars(profileName, envFile, projectPath);
+    // Grid Selenium: inyecta SELENIUM_REMOTE_URL para que conftest use webdriver.Remote.
+    // Vacío => conftest cae a Chrome local.
+    if (seleniumRemoteUrl) envVars.SELENIUM_REMOTE_URL = seleniumRemoteUrl;
     const io = req.app.get('io');
+
+    // Docker: si se pidió, levanta el grid Selenium y espera healthcheck ANTES de
+    // correr los tests. Si falla (Docker cerrado, etc.) aborta con error claro.
+    if (useDocker && seleniumRemoteUrl) {
+      io.emit('execution:preparing', { message: 'Iniciando Selenium en Docker (esperando healthcheck)...' });
+      try {
+        await ensureGrid(io);
+      } catch (e) {
+        io.emit('execution:prepare-failed', { error: e.message });
+        return res.status(500).json({ error: e.message });
+      }
+    }
+
     runTests(io, testIds, projectPath, pytestCmd, envVars);
     res.json({ success: true, message: `Starting ${testIds.length} tests sequentially` });
   } catch (e) {

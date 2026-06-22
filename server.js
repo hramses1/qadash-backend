@@ -42,6 +42,8 @@ app.use('/api/env', require('./routes/env'));
 app.use('/api/profiles', require('./routes/profiles'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/automation', require('./routes/automation'));
+app.use('/api/txtdata', require('./routes/txtdata'));
+app.use('/api/docker', require('./routes/docker'));
 
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);

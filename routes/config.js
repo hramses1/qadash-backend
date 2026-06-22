@@ -70,6 +70,40 @@ router.get('/browse', async (req, res) => {
   }
 });
 
+// Busca un archivo .env dentro de projectPath (raíz primero, luego subcarpetas, prof. 2)
+function findEnvFile(projectPath, depth = 2) {
+  if (!projectPath || !fs.existsSync(projectPath)) return null;
+  try {
+    if (!fs.statSync(projectPath).isDirectory()) return null;
+  } catch { return null; }
+
+  const root = path.join(projectPath, '.env');
+  if (fs.existsSync(root) && fs.statSync(root).isFile()) return root;
+
+  if (depth <= 0) return null;
+  let entries;
+  try { entries = fs.readdirSync(projectPath, { withFileTypes: true }); }
+  catch { return null; }
+
+  const SKIP = new Set(['node_modules', 'venv', '.git', '__pycache__', '.idea', '.vscode', 'dist', 'build']);
+  for (const e of entries) {
+    if (!e.isDirectory() || SKIP.has(e.name) || e.name.startsWith('.')) continue;
+    const found = findEnvFile(path.join(projectPath, e.name), depth - 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+// GET /api/config/detect-env?projectPath=... → { path | null }
+router.get('/detect-env', (req, res) => {
+  try {
+    const projectPath = req.query.projectPath || '';
+    res.json({ path: findEnvFile(projectPath) });
+  } catch (e) {
+    res.status(500).json({ error: e.message, path: null });
+  }
+});
+
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 
 function readConfig() {
@@ -90,14 +124,27 @@ router.get('/', (req, res) => {
 
 router.post('/', (req, res) => {
   try {
-    const { projectPath, envPath, pytestCmd } = req.body;
+    const { projectPath, envPath, pytestCmd, txtFolderPath, seleniumRemoteUrl } = req.body;
 
     // Detectar cambio de proyecto ANTES de sobrescribir config
     let prevProjectPath = '';
-    try { prevProjectPath = readConfig().projectPath || ''; } catch {}
+    let prevTxtFolderPath = '';
+    let prevSeleniumRemoteUrl = '';
+    try {
+      const prev = readConfig();
+      prevProjectPath = prev.projectPath || '';
+      prevTxtFolderPath = prev.txtFolderPath || '';
+      prevSeleniumRemoteUrl = prev.seleniumRemoteUrl || '';
+    } catch {}
     const projectChanged = !samePath(prevProjectPath, projectPath);
 
-    const updated = { projectPath, envPath, pytestCmd: pytestCmd || 'pytest' };
+    const updated = {
+      projectPath,
+      envPath,
+      pytestCmd: pytestCmd || 'pytest',
+      txtFolderPath: txtFolderPath !== undefined ? txtFolderPath : prevTxtFolderPath,
+      seleniumRemoteUrl: seleniumRemoteUrl !== undefined ? seleniumRemoteUrl : prevSeleniumRemoteUrl
+    };
     writeConfig(updated);
 
     // Proyecto distinto → reiniciar analítica/historial (pertenecen al anterior)
