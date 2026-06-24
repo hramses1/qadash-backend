@@ -27,7 +27,7 @@ function abortExecution() {
   }
 }
 
-async function runTests(io, testIds, projectPath, pytestCmd = 'pytest', envVars = {}) {
+async function runTests(io, testIds, projectPath, pytestCmd = 'pytest', envVars = {}, paramsByTest = {}) {
   running = true;
   aborted = false;
   currentProc = null;
@@ -46,7 +46,9 @@ async function runTests(io, testIds, projectPath, pytestCmd = 'pytest', envVars 
     const testId = testIds[i];
     io.emit('test:started', { id: testId, index: i, total: testIds.length });
 
-    const result = await runSingleTest(io, testId, projectPath, pytestCmd, envVars);
+    // Params específicos de este test pisan a los globales.
+    const perTest = paramsByTest[testId] || {};
+    const result = await runSingleTest(io, testId, projectPath, pytestCmd, { ...envVars, ...perTest });
     results.push(result);
 
     io.emit('test:completed', result);
