@@ -67,11 +67,27 @@ router.get('/collect', async (req, res) => {
 router.post('/run', async (req, res) => {
   try {
     if (isRunning()) return res.status(409).json({ error: 'Execution already in progress' });
-    const { testIds, profileName, envFile, useDocker } = req.body;
+    const { testIds, profileName, envFile, useDocker, params, paramsByTest } = req.body;
     if (!testIds || !testIds.length) return res.status(400).json({ error: 'No tests selected' });
-    const { projectPath, pytestCmd, seleniumRemoteUrl } = getConfig();
+    const { projectPath, pytestCmd, seleniumRemoteUrl, envPath } = getConfig();
     if (!projectPath) return res.status(400).json({ error: 'Project path not configured' });
-    const envVars = resolveEnvVars(profileName, envFile, projectPath);
+    let envVars = resolveEnvVars(profileName, envFile, projectPath);
+    // Sin perfil/envFile explícito: usa el .env configurado como base, así los
+    // params vacíos del modal caen al valor real del .env del proyecto.
+    if (Object.keys(envVars).length === 0 && envPath && fs.existsSync(envPath)) {
+      envVars = Object.fromEntries(
+        readEnv(envPath).filter(v => !v.isComment && v.key).map(v => [v.key, v.value])
+      );
+    }
+    // Overrides puntuales del usuario (modal de ejecución). Solo valores no vacíos
+    // pisan al .env/perfil; lo vacío deja que el test use su valor del .env.
+    if (params && typeof params === 'object') {
+      for (const [k, v] of Object.entries(params)) {
+        if (k && v !== undefined && v !== null && String(v).trim() !== '') {
+          envVars[String(k).trim()] = String(v);
+        }
+      }
+    }
     // Grid Selenium: inyecta SELENIUM_REMOTE_URL para que conftest use webdriver.Remote.
     // Vacío => conftest cae a Chrome local.
     if (seleniumRemoteUrl) envVars.SELENIUM_REMOTE_URL = seleniumRemoteUrl;
@@ -89,7 +105,20 @@ router.post('/run', async (req, res) => {
       }
     }
 
-    runTests(io, testIds, projectPath, pytestCmd, envVars);
+    // Sanea paramsByTest: { testId: { KEY: 'val' } } solo con valores no vacíos.
+    const cleanPerTest = {};
+    if (paramsByTest && typeof paramsByTest === 'object') {
+      for (const [id, kv] of Object.entries(paramsByTest)) {
+        if (!kv || typeof kv !== 'object') continue;
+        const o = {};
+        for (const [k, v] of Object.entries(kv)) {
+          if (k && v !== undefined && v !== null && String(v).trim() !== '') o[String(k).trim()] = String(v);
+        }
+        if (Object.keys(o).length) cleanPerTest[id] = o;
+      }
+    }
+
+    runTests(io, testIds, projectPath, pytestCmd, envVars, cleanPerTest);
     res.json({ success: true, message: `Starting ${testIds.length} tests sequentially` });
   } catch (e) {
     res.status(500).json({ error: e.message });
