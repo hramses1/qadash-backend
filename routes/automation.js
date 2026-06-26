@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const fs = require('fs');
 const path = require('path');
-const { checkAll, installAutomation } = require('../services/automationInstaller');
+const { checkAll, installAutomation, createVenv, installDeps } = require('../services/automationInstaller');
 const { resetProjectData, samePath } = require('../services/projectData');
 const { spawn } = require('child_process');
 
@@ -194,7 +194,50 @@ router.get('/branches', (req, res) => {
 });
 
 router.get('/status', (req, res) => {
-  res.json({ installing, pulling });
+  res.json({ installing, pulling, envBusy });
+});
+
+// ── Preparar entorno Python de un proyecto existente (sin clonar) ──
+let envBusy = false;
+
+function resolveProjectPath(req) {
+  const fromBody = req.body && req.body.projectPath;
+  if (fromBody) return fromBody;
+  try { return readConfig().projectPath || ''; } catch { return ''; }
+}
+
+router.post('/setup-venv', (req, res) => {
+  if (envBusy) return res.status(409).json({ error: 'Operación de entorno ya en progreso' });
+  const projectPath = resolveProjectPath(req);
+  if (!projectPath) return res.status(400).json({ error: 'Proyecto no configurado' });
+
+  const io = req.app.get('io');
+  envBusy = true;
+  res.json({ started: true });
+
+  createVenv(io, projectPath)
+    .catch(err => {
+      io.emit('env:log', { message: err.message, type: 'error' });
+      io.emit('env:failed', { error: err.message });
+    })
+    .finally(() => { envBusy = false; });
+});
+
+router.post('/setup-deps', (req, res) => {
+  if (envBusy) return res.status(409).json({ error: 'Operación de entorno ya en progreso' });
+  const projectPath = resolveProjectPath(req);
+  if (!projectPath) return res.status(400).json({ error: 'Proyecto no configurado' });
+
+  const io = req.app.get('io');
+  envBusy = true;
+  res.json({ started: true });
+
+  installDeps(io, projectPath)
+    .catch(err => {
+      io.emit('env:log', { message: err.message, type: 'error' });
+      io.emit('env:failed', { error: err.message });
+    })
+    .finally(() => { envBusy = false; });
 });
 
 router.get('/install-status', (req, res) => {
