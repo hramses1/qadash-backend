@@ -300,4 +300,97 @@ async function installAutomation(io, repoUrl, installPath) {
   }
 }
 
-module.exports = { checkAll, installAutomation };
+// Asegura que la librería virtualenv esté disponible; si falta, la instala con pip.
+async function ensureVirtualenv(pythonCmd, emit) {
+  let venv = checkVirtualenv(pythonCmd);
+  if (venv.ok) return venv;
+  emit('virtualenv no encontrado. Instalando con pip...', 'info');
+  await runCommand(pythonCmd, ['-m', 'pip', 'install', 'virtualenv'], null, emit);
+  venv = checkVirtualenv(pythonCmd);
+  if (!venv.ok) {
+    throw new Error('No se pudo instalar virtualenv automáticamente. Ejecuta manualmente: pip install virtualenv');
+  }
+  emit('virtualenv instalado correctamente', 'success');
+  return venv;
+}
+
+// Prepara el entorno de un proyecto YA EXISTENTE (sin clonar):
+// valida Python → asegura virtualenv → crea el venv "venv".
+async function createVenv(io, projectPath) {
+  const emit = (msg, type = 'info') => io.emit('env:log', { message: msg, type });
+  const prog = (percent, label) => io.emit('env:progress', { percent, label });
+  try {
+    if (!projectPath || !fs.existsSync(projectPath)) {
+      const msg = 'La ruta del proyecto no es válida o no existe.';
+      emit(msg, 'error'); io.emit('env:failed', { error: msg }); return;
+    }
+
+    prog(5, 'Validando Python...');
+    const python = checkPython();
+    if (!python.ok) { emit(python.error, 'error'); io.emit('env:failed', { error: python.error }); return; }
+    emit(`Python detectado: ${python.version}`, 'success');
+
+    prog(20, 'Verificando virtualenv...');
+    const venv = await ensureVirtualenv(python.cmd, emit);
+    emit(`${venv.type} disponible`, 'success');
+
+    const venvPath = path.join(projectPath, 'venv');
+    if (fs.existsSync(venvPath)) {
+      emit('El entorno virtual "venv" ya existe — se reutiliza.', 'info');
+      prog(100, 'Entorno virtual listo');
+      io.emit('env:venv-done', { exists: true });
+      return;
+    }
+
+    prog(50, 'Creando entorno virtual...');
+    emit(`Creando entorno virtual "venv" con ${venv.type}...`, 'info');
+    await runCommand(venv.runner[0], [...venv.runner.slice(1), venvPath], projectPath, emit);
+    emit('Entorno virtual "venv" creado', 'success');
+    prog(100, 'Entorno virtual creado');
+    io.emit('env:venv-done', { exists: false });
+  } catch (e) {
+    emit(e.message, 'error');
+    io.emit('env:failed', { error: e.message });
+  }
+}
+
+// Instala las dependencias de requirements.txt usando el pip del venv del proyecto.
+async function installDeps(io, projectPath) {
+  const emit = (msg, type = 'info') => io.emit('env:log', { message: msg, type });
+  const prog = (percent, label) => io.emit('env:progress', { percent, label });
+  try {
+    if (!projectPath || !fs.existsSync(projectPath)) {
+      const msg = 'La ruta del proyecto no es válida o no existe.';
+      emit(msg, 'error'); io.emit('env:failed', { error: msg }); return;
+    }
+    const venvPath = path.join(projectPath, 'venv');
+    if (!fs.existsSync(venvPath)) {
+      const msg = 'No existe el entorno virtual "venv". Créalo primero.';
+      emit(msg, 'error'); io.emit('env:failed', { error: msg }); return;
+    }
+
+    const requirementsPath = path.join(projectPath, 'requirements.txt');
+    const pipCmd = process.platform === 'win32'
+      ? path.join(venvPath, 'Scripts', 'pip.exe')
+      : path.join(venvPath, 'bin', 'pip');
+
+    if (!fs.existsSync(requirementsPath)) {
+      emit('No se encontró requirements.txt — no hay dependencias que instalar.', 'info');
+      prog(100, 'Sin requirements.txt');
+      io.emit('env:deps-done', { skipped: true });
+      return;
+    }
+
+    prog(10, 'Instalando dependencias...');
+    emit('Instalando dependencias desde requirements.txt...', 'info');
+    await runCommand(pipCmd, ['install', '-r', requirementsPath], projectPath, emit);
+    emit('Dependencias instaladas exitosamente', 'success');
+    prog(100, 'Dependencias instaladas');
+    io.emit('env:deps-done', { skipped: false });
+  } catch (e) {
+    emit(e.message, 'error');
+    io.emit('env:failed', { error: e.message });
+  }
+}
+
+module.exports = { checkAll, installAutomation, createVenv, installDeps };
