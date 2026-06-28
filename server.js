@@ -44,11 +44,16 @@ app.use('/api/reports', require('./routes/reports'));
 app.use('/api/automation', require('./routes/automation'));
 app.use('/api/txtdata', require('./routes/txtdata'));
 app.use('/api/docker', require('./routes/docker'));
+app.use('/api/schedules', require('./routes/schedules'));
+app.use('/api/errors', require('./routes/errors'));
 
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
   socket.on('disconnect', () => console.log('Client disconnected:', socket.id));
 });
+
+// Programador de tests (calendarización): revisa cada minuto y dispara.
+require('./services/scheduler').start(io);
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
