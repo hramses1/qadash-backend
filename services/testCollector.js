@@ -10,7 +10,10 @@ function collectTests(projectPath, pytestCmd = 'pytest') {
     const proc = spawn(cmd, args, {
       cwd: projectPath,
       shell: true,
-      env: { ...process.env }
+      // Fuerza UTF-8 en el subproceso: en Windows pytest emitiría cp1252 y los
+      // nombres de test con tildes (ó, á) llegarían corruptos (�), luego
+      // no harían match al ejecutarlos por nodeid.
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
     });
 
     let stdout = '';

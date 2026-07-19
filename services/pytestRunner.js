@@ -114,7 +114,9 @@ function runSingleTest(io, profileId, testId, projectPath, pytestCmd, envVars = 
     const proc = spawn(cmd, args, {
       cwd: projectPath,
       shell: true,
-      env: { ...process.env, ...envVars }
+      // UTF-8 forzado: mismos ids con tildes que en la colección (si no, en
+      // Windows pytest usaría cp1252 y el nodeid no coincidiría → 0 tests).
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', ...envVars }
     });
 
     _state(profileId).currentProc = proc;
