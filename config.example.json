@@ -1,0 +1,9 @@
+{
+  "projectPath": "",
+  "envPath": "",
+  "pytestCmd": ".\\venv\\Scripts\\pytest.exe",
+  "txtFolderPath": "",
+  "seleniumRemoteUrl": "",
+  "errorImagesPath": "",
+  "jsonDataPath": ""
+}

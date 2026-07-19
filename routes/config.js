@@ -124,19 +124,21 @@ router.get('/', (req, res) => {
 
 router.post('/', (req, res) => {
   try {
-    const { projectPath, envPath, pytestCmd, txtFolderPath, seleniumRemoteUrl, errorImagesPath } = req.body;
+    const { projectPath, envPath, pytestCmd, txtFolderPath, seleniumRemoteUrl, errorImagesPath, jsonDataPath } = req.body;
 
     // Detectar cambio de proyecto ANTES de sobrescribir config
     let prevProjectPath = '';
     let prevTxtFolderPath = '';
     let prevSeleniumRemoteUrl = '';
     let prevErrorImagesPath = '';
+    let prevJsonDataPath = '';
     try {
       const prev = readConfig();
       prevProjectPath = prev.projectPath || '';
       prevTxtFolderPath = prev.txtFolderPath || '';
       prevSeleniumRemoteUrl = prev.seleniumRemoteUrl || '';
       prevErrorImagesPath = prev.errorImagesPath || '';
+      prevJsonDataPath = prev.jsonDataPath || '';
     } catch {}
     const projectChanged = !samePath(prevProjectPath, projectPath);
 
@@ -146,7 +148,8 @@ router.post('/', (req, res) => {
       pytestCmd: pytestCmd || 'pytest',
       txtFolderPath: txtFolderPath !== undefined ? txtFolderPath : prevTxtFolderPath,
       seleniumRemoteUrl: seleniumRemoteUrl !== undefined ? seleniumRemoteUrl : prevSeleniumRemoteUrl,
-      errorImagesPath: errorImagesPath !== undefined ? errorImagesPath : prevErrorImagesPath
+      errorImagesPath: errorImagesPath !== undefined ? errorImagesPath : prevErrorImagesPath,
+      jsonDataPath: jsonDataPath !== undefined ? jsonDataPath : prevJsonDataPath
     };
     writeConfig(updated);
 
