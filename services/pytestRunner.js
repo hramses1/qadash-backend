@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const runtime = require('./runtimeRegistry');
+const { pytestEnv } = require('./testCollector');
 
 const DEFAULT_REPORTS_DIR = path.join(__dirname, '..', 'reports');
 
@@ -107,16 +108,19 @@ function runSingleTest(io, profileId, testId, projectPath, pytestCmd, envVars = 
     const cmdParts = pytestCmd.trim().split(/\s+/);
     const cmd = cmdParts[0];
     const cmdArgs = cmdParts.slice(1);
-    const args = [...cmdArgs, testId, '-v', '--tb=short', '--no-header', '-p', 'no:cacheprovider'];
+    // Quotea el nodeid: con shell:true, ids parametrizados con espacios/corchetes
+    // (`test_x[caso con espacio]`) se partirían en varios args → "not found".
+    const quotedId = JSON.stringify(testId);
+    const args = [...cmdArgs, quotedId, '-v', '--tb=short', '--no-header', '-p', 'no:cacheprovider'];
 
     let output = '';
 
     const proc = spawn(cmd, args, {
       cwd: projectPath,
       shell: true,
-      // UTF-8 forzado: mismos ids con tildes que en la colección (si no, en
-      // Windows pytest usaría cp1252 y el nodeid no coincidiría → 0 tests).
-      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', ...envVars }
+      // Env robusto: raíz del proyecto en PYTHONPATH (imports) + UTF-8 (tildes).
+      // Ids coinciden con la colección, que usa el mismo env.
+      env: pytestEnv(projectPath, envVars)
     });
 
     _state(profileId).currentProc = proc;

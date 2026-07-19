@@ -1,4 +1,23 @@
 const { spawn } = require('child_process');
+const path = require('path');
+
+// Entorno del subproceso pytest, robusto para cualquier automatización:
+// - PYTHONPATH incluye la raíz del proyecto → resuelve imports top-level
+//   (`from src...`, `from app...`, `from pages...`) igual que `python -m pytest`
+//   o VS Code, sin exigir conftest.py/pythonpath en el repo del usuario.
+// - PYTHONUTF8/PYTHONIOENCODING → en Windows evita que tildes/ñ en nombres de
+//   test se corrompan (cp1252 → �) y luego no coincidan por nodeid.
+function pytestEnv(projectPath, extra = {}) {
+  const prior = extra.PYTHONPATH || process.env.PYTHONPATH || '';
+  const pythonpath = prior ? `${projectPath}${path.delimiter}${prior}` : projectPath;
+  return {
+    ...process.env,
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+    ...extra,
+    PYTHONPATH: pythonpath,
+  };
+}
 
 function collectTests(projectPath, pytestCmd = 'pytest') {
   return new Promise((resolve, reject) => {
@@ -10,10 +29,7 @@ function collectTests(projectPath, pytestCmd = 'pytest') {
     const proc = spawn(cmd, args, {
       cwd: projectPath,
       shell: true,
-      // Fuerza UTF-8 en el subproceso: en Windows pytest emitiría cp1252 y los
-      // nombres de test con tildes (ó, á) llegarían corruptos (�), luego
-      // no harían match al ejecutarlos por nodeid.
-      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+      env: pytestEnv(projectPath)
     });
 
     let stdout = '';
@@ -44,7 +60,7 @@ function collectTests(projectPath, pytestCmd = 'pytest') {
 
       // Extract files that failed to import
       const errorFiles = lines
-        .filter(l => l.startsWith('ERROR ') && l.includes('/') || l.includes('\\'))
+        .filter(l => l.startsWith('ERROR ') && (l.includes('/') || l.includes('\\')))
         .map(l => l.replace(/^ERROR\s+/, '').replace(/\\/g, '/').trim())
         .filter(l => !l.startsWith('='));
 
@@ -78,4 +94,4 @@ function collectTests(projectPath, pytestCmd = 'pytest') {
   });
 }
 
-module.exports = { collectTests };
+module.exports = { collectTests, pytestEnv };
