@@ -27,7 +27,7 @@ test('requireFeature: flag true -> next()', () => {
   const requireFeature = loadWith({ docker: true });
   const res = fakeRes();
   let called = false;
-  requireFeature('docker')({}, res, () => { called = true; });
+  requireFeature('docker')({ profile: { features: 'x' } }, res, () => { called = true; });
   assert.strictEqual(called, true);
   assert.strictEqual(res.statusCode, 0);
 });
@@ -36,7 +36,7 @@ test('requireFeature: flag false -> 403', () => {
   const requireFeature = loadWith({ docker: false });
   const res = fakeRes();
   let called = false;
-  requireFeature('docker')({}, res, () => { called = true; });
+  requireFeature('docker')({ profile: { features: 'x' } }, res, () => { called = true; });
   assert.strictEqual(called, false);
   assert.strictEqual(res.statusCode, 403);
   assert.strictEqual(res.body.feature, 'docker');
