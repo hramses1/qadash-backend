@@ -3,25 +3,27 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
-const SNAP_PATH = path.join(__dirname, '..', 'data', 'json-snapshots.json');
-
-function getConfig() {
-  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+function getConfig(req) {
+  return JSON.parse(fs.readFileSync(req.profile.config, 'utf-8'));
 }
 
-function getBase() {
-  const cfg = getConfig();
+function getBase(req) {
+  const cfg = getConfig(req);
   return cfg.jsonDataPath || '';
 }
 
+function snapPath(req) {
+  return path.join(req.profile.dataDir, 'json-snapshots.json');
+}
+
 // ── Snapshots (perfiles por archivo) ──────────────────────────────
-function readSnaps() {
-  try { return JSON.parse(fs.readFileSync(SNAP_PATH, 'utf-8')); }
+function readSnaps(req) {
+  try { return JSON.parse(fs.readFileSync(snapPath(req), 'utf-8')); }
   catch { return {}; }
 }
-function writeSnaps(data) {
-  fs.writeFileSync(SNAP_PATH, JSON.stringify(data, null, 2));
+function writeSnaps(req, data) {
+  fs.mkdirSync(req.profile.dataDir, { recursive: true });
+  fs.writeFileSync(snapPath(req), JSON.stringify(data, null, 2));
 }
 function snapKey(folder, file) {
   return `${folder || ''}/${file}`;
@@ -66,7 +68,7 @@ function buildTree(base) {
 // GET /api/jsondata/tree → carpetas + archivos json
 router.get('/tree', (req, res) => {
   try {
-    const base = getBase();
+    const base = getBase(req);
     if (!base) return res.json({ configured: false, base: '', tree: [] });
     if (!fs.existsSync(base)) return res.status(400).json({ configured: true, base, tree: [], error: 'La carpeta configurada no existe' });
     res.json({ configured: true, base, tree: buildTree(base) });
@@ -78,7 +80,7 @@ router.get('/tree', (req, res) => {
 // GET /api/jsondata/file?folder=&file= → contenido json
 router.get('/file', (req, res) => {
   try {
-    const base = getBase();
+    const base = getBase(req);
     if (!base) return res.status(400).json({ error: 'Carpeta de datos JSON no configurada' });
     const target = resolveFilePath(base, req.query.folder, req.query.file);
     if (!fs.existsSync(target)) return res.status(404).json({ error: 'Archivo no encontrado', path: target });
@@ -95,7 +97,7 @@ router.get('/file', (req, res) => {
 // POST /api/jsondata/file?folder=&file=  body:{ data }
 router.post('/file', (req, res) => {
   try {
-    const base = getBase();
+    const base = getBase(req);
     if (!base) return res.status(400).json({ error: 'Carpeta de datos JSON no configurada' });
     const target = resolveFilePath(base, req.query.folder, req.query.file);
     if (!('data' in req.body)) return res.status(400).json({ error: 'Falta el campo data' });
@@ -110,7 +112,7 @@ router.post('/file', (req, res) => {
 // GET /api/jsondata/snapshots?folder=&file= → { nombre: data }
 router.get('/snapshots', (req, res) => {
   try {
-    const snaps = readSnaps();
+    const snaps = readSnaps(req);
     res.json(snaps[snapKey(req.query.folder, req.query.file)] || {});
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -124,10 +126,10 @@ router.post('/snapshots/:name', (req, res) => {
     if (!name) return res.status(400).json({ error: 'Nombre requerido' });
     if (!('data' in req.body)) return res.status(400).json({ error: 'Falta el campo data' });
     const key = snapKey(req.query.folder, req.query.file);
-    const snaps = readSnaps();
+    const snaps = readSnaps(req);
     if (!snaps[key]) snaps[key] = {};
     snaps[key][name] = req.body.data;
-    writeSnaps(snaps);
+    writeSnaps(req, snaps);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -138,8 +140,8 @@ router.post('/snapshots/:name', (req, res) => {
 router.delete('/snapshots/:name', (req, res) => {
   try {
     const key = snapKey(req.query.folder, req.query.file);
-    const snaps = readSnaps();
-    if (snaps[key]) { delete snaps[key][req.params.name]; writeSnaps(snaps); }
+    const snaps = readSnaps(req);
+    if (snaps[key]) { delete snaps[key][req.params.name]; writeSnaps(req, snaps); }
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

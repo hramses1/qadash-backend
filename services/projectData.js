@@ -1,18 +1,15 @@
 const fs = require('fs');
 const path = require('path');
 
-const REPORTS_DIR     = path.join(__dirname, '..', 'reports');
-const COLLECTION_PATH = path.join(__dirname, '..', 'data', 'last-collection.json');
-
-// Borra reportes + caché de colección. Se usa al cambiar de proyecto: la
-// analítica e historial pertenecen al proyecto anterior y ya no aplican.
-function resetProjectData() {
+// Borra reportes + caché de colección de un perfil. Se usa al cambiar de
+// proyecto: la analítica e historial pertenecen al proyecto anterior.
+function resetProjectData(reportsDir, collectionPath) {
   let removedReports = 0;
   try {
-    if (fs.existsSync(REPORTS_DIR)) {
-      for (const f of fs.readdirSync(REPORTS_DIR)) {
+    if (reportsDir && fs.existsSync(reportsDir)) {
+      for (const f of fs.readdirSync(reportsDir)) {
         if (f.endsWith('.json')) {
-          try { fs.unlinkSync(path.join(REPORTS_DIR, f)); removedReports++; } catch {}
+          try { fs.unlinkSync(path.join(reportsDir, f)); removedReports++; } catch {}
         }
       }
     }
@@ -20,8 +17,8 @@ function resetProjectData() {
 
   let removedCollection = false;
   try {
-    if (fs.existsSync(COLLECTION_PATH)) {
-      fs.unlinkSync(COLLECTION_PATH);
+    if (collectionPath && fs.existsSync(collectionPath)) {
+      fs.unlinkSync(collectionPath);
       removedCollection = true;
     }
   } catch {}

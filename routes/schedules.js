@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { load, save, uid, computeNextRun, trigger } = require('../services/scheduler');
+const { loadFrom, saveTo, uid, computeNextRun, trigger } = require('../services/scheduler');
+const pm = require('../services/profileManager');
 
 // Normaliza el payload de una programación.
 function sanitize(body, existing = {}) {
@@ -36,56 +37,57 @@ function withMeta(s) {
 
 // GET /api/schedules → lista con nextRun
 router.get('/', (req, res) => {
-  res.json({ schedules: load().map(withMeta) });
+  res.json({ schedules: loadFrom(req.profile.schedules).map(withMeta) });
 });
 
 // POST /api/schedules → crea
 router.post('/', (req, res) => {
-  const list = load();
+  const list = loadFrom(req.profile.schedules);
   const s = sanitize(req.body, {
     id: uid(), enabled: true, days: [], testIds: [], repeat: 1, useDocker: false,
     params: {}, paramsByTest: {}, lastRun: null, createdAt: new Date().toISOString()
   });
   if (!s.time) return res.status(400).json({ error: 'Hora (HH:MM) requerida' });
   list.push(s);
-  save(list);
+  saveTo(req.profile.schedules, list);
   res.json({ schedule: withMeta(s) });
 });
 
 // PUT /api/schedules/:id → actualiza
 router.put('/:id', (req, res) => {
-  const list = load();
+  const list = loadFrom(req.profile.schedules);
   const idx = list.findIndex(x => x.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Programación no encontrada' });
   list[idx] = sanitize(req.body, list[idx]);
-  save(list);
+  saveTo(req.profile.schedules, list);
   res.json({ schedule: withMeta(list[idx]) });
 });
 
 // PATCH /api/schedules/:id/toggle → habilita/inhabilita
 router.patch('/:id/toggle', (req, res) => {
-  const list = load();
+  const list = loadFrom(req.profile.schedules);
   const s = list.find(x => x.id === req.params.id);
   if (!s) return res.status(404).json({ error: 'No encontrada' });
   s.enabled = !s.enabled;
-  save(list);
+  saveTo(req.profile.schedules, list);
   res.json({ schedule: withMeta(s) });
 });
 
 // DELETE /api/schedules/:id
 router.delete('/:id', (req, res) => {
-  const list = load();
+  const list = loadFrom(req.profile.schedules);
   const next = list.filter(x => x.id !== req.params.id);
   if (next.length === list.length) return res.status(404).json({ error: 'No encontrada' });
-  save(next);
+  saveTo(req.profile.schedules, next);
   res.json({ success: true });
 });
 
 // POST /api/schedules/:id/run → ejecuta ahora
 router.post('/:id/run', async (req, res) => {
-  const s = load().find(x => x.id === req.params.id);
+  const s = loadFrom(req.profile.schedules).find(x => x.id === req.params.id);
   if (!s) return res.status(404).json({ error: 'No encontrada' });
-  const result = await trigger(s);
+  const paths = pm.profilePaths(req.profile.id);
+  const result = await trigger(s, paths, req.app.get('io'));
   if (!result.ok) return res.status(409).json({ error: result.reason });
   res.json({ success: true });
 });

@@ -3,17 +3,16 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 const IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 
-function getConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); }
+function getConfig(req) {
+  try { return JSON.parse(fs.readFileSync(req.profile.config, 'utf-8')); }
   catch { return {}; }
 }
 
 // Carpeta de imágenes: override en config o <projectPath>/reports/errors.
-function resolveFolder() {
-  const cfg = getConfig();
+function resolveFolder(req) {
+  const cfg = getConfig(req);
   if (cfg.errorImagesPath) return cfg.errorImagesPath;
   if (cfg.projectPath) return path.join(cfg.projectPath, 'reports', 'errors');
   return '';
@@ -22,7 +21,7 @@ function resolveFolder() {
 // GET /api/errors/images → { configured, folder, images: [{name, mtime, size}] }
 router.get('/images', (req, res) => {
   try {
-    const folder = resolveFolder();
+    const folder = resolveFolder(req);
     if (!folder) return res.json({ configured: false, folder: '', images: [] });
     if (!fs.existsSync(folder)) return res.json({ configured: true, folder, images: [], missing: true });
 
@@ -43,7 +42,7 @@ router.get('/images', (req, res) => {
 // GET /api/errors/image?name=... → sirve el archivo (validado dentro de la carpeta)
 router.get('/image', (req, res) => {
   try {
-    const folder = resolveFolder();
+    const folder = resolveFolder(req);
     if (!folder) return res.status(400).send('Carpeta no configurada');
     const name = req.query.name || '';
     const filePath = path.resolve(folder, name);

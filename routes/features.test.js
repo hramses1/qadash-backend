@@ -8,12 +8,14 @@ const express = require('express');
 
 function server() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffr-'));
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ projectPath: 'C:\\proj\\a' }));
+  const featuresPath = path.join(dir, 'features.json');
   process.env.QADASH_DATA_DIR = dir;
   delete require.cache[require.resolve('../services/featureFlags')];
   delete require.cache[require.resolve('./features')];
   const app = express();
   app.use(express.json());
+  // Simula el middleware resolveProfile: adjunta la ruta de features del perfil.
+  app.use((req, _res, next) => { req.profile = { features: featuresPath }; next(); });
   app.use('/api/features', require('./features'));
   return app.listen(0);
 }

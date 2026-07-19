@@ -104,19 +104,17 @@ router.get('/detect-env', (req, res) => {
   }
 });
 
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
-
-function readConfig() {
-  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+function readConfig(p) {
+  return JSON.parse(fs.readFileSync(p, 'utf-8'));
 }
 
-function writeConfig(data) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2));
+function writeConfig(p, data) {
+  fs.writeFileSync(p, JSON.stringify(data, null, 2));
 }
 
 router.get('/', (req, res) => {
   try {
-    res.json(readConfig());
+    res.json(readConfig(req.profile.config));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -133,7 +131,7 @@ router.post('/', (req, res) => {
     let prevErrorImagesPath = '';
     let prevJsonDataPath = '';
     try {
-      const prev = readConfig();
+      const prev = readConfig(req.profile.config);
       prevProjectPath = prev.projectPath || '';
       prevTxtFolderPath = prev.txtFolderPath || '';
       prevSeleniumRemoteUrl = prev.seleniumRemoteUrl || '';
@@ -151,12 +149,12 @@ router.post('/', (req, res) => {
       errorImagesPath: errorImagesPath !== undefined ? errorImagesPath : prevErrorImagesPath,
       jsonDataPath: jsonDataPath !== undefined ? jsonDataPath : prevJsonDataPath
     };
-    writeConfig(updated);
+    writeConfig(req.profile.config, updated);
 
     // Proyecto distinto → reiniciar analítica/historial (pertenecen al anterior)
     let reset = null;
     if (projectChanged && prevProjectPath) {
-      reset = resetProjectData();
+      reset = resetProjectData(req.profile.reportsDir, req.profile.collection);
     }
 
     res.json({ success: true, config: updated, projectChanged, reset });

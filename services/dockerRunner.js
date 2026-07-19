@@ -1,77 +1,49 @@
 const { spawn, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const runtime = require('./runtimeRegistry');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
+// Estado por perfil: cada perfil corre compose en paralelo con nombre de
+// proyecto namespaced (`-p qadash-<id>`) para no pisar contenedores de otro.
+const state = new Map(); // profileId -> { running, currentProc, currentAction }
 
-let currentProc = null;
-let running = false;
-let currentAction = null;
+function _state(profileId) {
+  if (!state.has(profileId)) state.set(profileId, { running: false, currentProc: null, currentAction: null });
+  return state.get(profileId);
+}
 
-// Mapa de acciones → argumentos de `docker`.
-// --abort-on-container-exit: el run completo termina cuando el contenedor
-// "tests" sale (si no, `up` queda adjunto para siempre por selenium). Así el
-// dashboard recupera estado idle y muestra el código de salida de pytest.
-// up-selenium usa -d: arranca el grid en segundo plano y devuelve enseguida,
-// dejándolo vivo para ver el navegador en http://localhost:7900.
-const ACTIONS = {
-  'up-build':    ['compose', 'up', '--build', '--abort-on-container-exit'],
-  // --wait: bloquea hasta que el healthcheck del grid pasa (selenium listo).
-  'up-selenium': ['compose', 'up', '-d', '--wait', 'selenium'],
-  'rebuild':     ['compose', 'up', '--build', '--force-recreate', '--abort-on-container-exit'],
-  'down':        ['compose', 'down'],
-  // Baja TODOS los contenedores del proyecto (incluye huérfanos de runs viejos).
-  'down-all':    ['compose', 'down', '--remove-orphans'],
+// Nombre de proyecto compose por perfil → aísla contenedores/redes/volúmenes.
+function projectName(profile) {
+  return `qadash-${profile.id}`;
+}
+
+// Argumentos de compose namespaced: docker compose -p qadash-<id> <tail...>
+function composeArgs(profile, tail) {
+  return ['compose', '-p', projectName(profile), ...tail];
+}
+
+// Tails de acciones (sin el prefijo `compose -p <name>`).
+const ACTION_TAILS = {
+  'up-build':    ['up', '--build', '--abort-on-container-exit'],
+  'up-selenium': ['up', '-d', '--wait', 'selenium'],
+  'rebuild':     ['up', '--build', '--force-recreate', '--abort-on-container-exit'],
+  'down':        ['down'],
+  'down-all':    ['down', '--remove-orphans'],
 };
 
-function isRunning() {
-  return running;
+function isRunning(profileId) {
+  const s = state.get(profileId);
+  return !!(s && s.running);
 }
 
-function status() {
-  return { running, action: currentAction };
+function status(profile) {
+  const s = _state(profile.id);
+  return { running: s.running, action: s.currentAction };
 }
 
-// Cuenta los contenedores DEL PROYECTO en ejecución (`compose ps -q` → un id por
-// servicio corriendo). Sirve para saber si hay algo que bajar antes de `down`.
-function projectStatus() {
-  return new Promise(resolve => {
-    const projectPath = readProjectPath();
-    if (!projectPath || !fs.existsSync(projectPath) || !hasCompose(projectPath)) {
-      return resolve({ count: 0 });
-    }
-    const shell = process.platform === 'win32';
-    const proc = spawn('docker', ['compose', 'ps', '-q'], { cwd: projectPath, shell });
-    let out = '';
-    proc.stdout.on('data', d => { out += d.toString(); });
-    proc.on('error', () => resolve({ count: 0 }));
-    proc.on('close', () => {
-      const ids = out.split('\n').map(s => s.trim()).filter(Boolean);
-      resolve({ count: ids.length });
-    });
-  });
-}
-
-// ¿Está el contenedor selenium levantado? `compose ps -q selenium` devuelve el
-// id solo si el servicio está corriendo (ps oculta los detenidos por defecto).
-function gridStatus() {
-  return new Promise(resolve => {
-    const projectPath = readProjectPath();
-    if (!projectPath || !fs.existsSync(projectPath) || !hasCompose(projectPath)) {
-      return resolve({ up: false });
-    }
-    const shell = process.platform === 'win32';
-    const proc = spawn('docker', ['compose', 'ps', '-q', 'selenium'], { cwd: projectPath, shell });
-    let out = '';
-    proc.stdout.on('data', d => { out += d.toString(); });
-    proc.on('error', () => resolve({ up: false }));
-    proc.on('close', () => resolve({ up: out.trim().length > 0 }));
-  });
-}
-
-function readProjectPath() {
+function readProjectPath(profile) {
   try {
-    const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+    const cfg = JSON.parse(fs.readFileSync(profile.config, 'utf-8'));
     return cfg.projectPath || '';
   } catch {
     return '';
@@ -85,6 +57,39 @@ function hasCompose(projectPath) {
          fs.existsSync(path.join(projectPath, 'compose.yaml'));
 }
 
+function projectStatus(profile) {
+  return new Promise(resolve => {
+    const projectPath = readProjectPath(profile);
+    if (!projectPath || !fs.existsSync(projectPath) || !hasCompose(projectPath)) {
+      return resolve({ count: 0 });
+    }
+    const shell = process.platform === 'win32';
+    const proc = spawn('docker', composeArgs(profile, ['ps', '-q']), { cwd: projectPath, shell });
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString(); });
+    proc.on('error', () => resolve({ count: 0 }));
+    proc.on('close', () => {
+      const ids = out.split('\n').map(s => s.trim()).filter(Boolean);
+      resolve({ count: ids.length });
+    });
+  });
+}
+
+function gridStatus(profile) {
+  return new Promise(resolve => {
+    const projectPath = readProjectPath(profile);
+    if (!projectPath || !fs.existsSync(projectPath) || !hasCompose(projectPath)) {
+      return resolve({ up: false });
+    }
+    const shell = process.platform === 'win32';
+    const proc = spawn('docker', composeArgs(profile, ['ps', '-q', 'selenium']), { cwd: projectPath, shell });
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString(); });
+    proc.on('error', () => resolve({ up: false }));
+    proc.on('close', () => resolve({ up: out.trim().length > 0 }));
+  });
+}
+
 // Verifica que Docker exista y el daemon responda (docker info).
 function checkDocker() {
   return new Promise((resolve) => {
@@ -96,7 +101,6 @@ function checkDocker() {
     ver.on('close', code => {
       if (code !== 0) return resolve({ ok: false, error: 'Docker no encontrado. Instala Docker Desktop.' });
       const version = out.trim();
-      // Daemon corriendo?
       const info = spawn('docker', ['info', '--format', '{{.ServerVersion}}'], { shell });
       let derr = '';
       info.stderr.on('data', d => { derr += d.toString(); });
@@ -110,12 +114,9 @@ function checkDocker() {
 }
 
 // Lista los contenedores Docker en ejecución (todos, no solo del proyecto).
-// Usa tab como separador (carácter real, no metacarácter de shell).
 function listContainers() {
   return new Promise(resolve => {
     const shell = process.platform === 'win32';
-    // Separador sin espacios ni metacaracteres de shell: con shell:true un \t
-    // o espacio rompería el arg en varios y `docker ps` recibiría argumentos.
     const SEP = '@@@';
     const fmt = ['{{.Names}}', '{{.Image}}', '{{.Status}}', '{{.Ports}}'].join(SEP);
     const proc = spawn('docker', ['ps', '--format', fmt], { shell });
@@ -136,78 +137,81 @@ function listContainers() {
   });
 }
 
-// Lanza una acción de compose y transmite la salida por Socket.io.
-// Resuelve con el código de salida; rechaza solo en errores de validación/spawn.
-function run(io, action) {
+// Lanza una acción de compose (namespaced por perfil) y transmite la salida a
+// la sala del perfil. Resuelve con el código de salida.
+function run(io, profile, action) {
   return new Promise((resolve, reject) => {
-    if (running) return reject(new Error('Ya hay una operación Docker en curso'));
+    const s = _state(profile.id);
+    if (s.running) return reject(new Error('Ya hay una operación Docker en curso'));
 
-    const args = ACTIONS[action];
-    if (!args) return reject(new Error(`Acción Docker inválida: ${action}`));
+    const tail = ACTION_TAILS[action];
+    if (!tail) return reject(new Error(`Acción Docker inválida: ${action}`));
 
-    const projectPath = readProjectPath();
+    const projectPath = readProjectPath(profile);
     if (!projectPath) return reject(new Error('projectPath no configurado. Configúralo en Ajustes.'));
     if (!fs.existsSync(projectPath)) return reject(new Error(`El proyecto no existe: ${projectPath}`));
     if (!hasCompose(projectPath)) return reject(new Error('No se encontró docker-compose.yml en el proyecto.'));
 
-    running = true;
-    currentAction = action;
+    const args = composeArgs(profile, tail);
+    s.running = true;
+    s.currentAction = action;
+    runtime.start(io, profile.id, 'docker');
 
-    const emit = (message, type = 'info') => io.emit('docker:log', { message, type });
-    io.emit('docker:started', { action });
+    const room = `profile:${profile.id}`;
+    const emit = (message, type = 'info') => io.to(room).emit('docker:log', { message, type, profileId: profile.id });
+    io.to(room).emit('docker:started', { action, profileId: profile.id });
     emit(`$ docker ${args.join(' ')}  (cwd: ${projectPath})`, 'cmd');
 
     const proc = spawn('docker', args, { cwd: projectPath, shell: process.platform === 'win32' });
-    currentProc = proc;
+    s.currentProc = proc;
 
     proc.stdout.on('data', d => d.toString().split('\n').forEach(l => { if (l.trim()) emit(l.trim()); }));
-    // Docker compose escribe casi todo (build, pull, logs) por stderr — tratarlo como info.
     proc.stderr.on('data', d => d.toString().split('\n').forEach(l => { if (l.trim()) emit(l.trim()); }));
 
     proc.on('close', code => {
-      const act = currentAction;
-      running = false;
-      currentProc = null;
-      currentAction = null;
-      io.emit('docker:exit', { action: act, code });
+      const act = s.currentAction;
+      s.running = false;
+      s.currentProc = null;
+      s.currentAction = null;
+      runtime.stop(io, profile.id, 'docker');
+      io.to(room).emit('docker:exit', { action: act, code, profileId: profile.id });
       resolve({ code });
     });
 
     proc.on('error', err => {
-      const act = currentAction;
-      running = false;
-      currentProc = null;
-      currentAction = null;
-      io.emit('docker:log', { message: err.message, type: 'error' });
-      io.emit('docker:exit', { action: act, code: -1, error: err.message });
+      const act = s.currentAction;
+      s.running = false;
+      s.currentProc = null;
+      s.currentAction = null;
+      runtime.stop(io, profile.id, 'docker');
+      io.to(room).emit('docker:log', { message: err.message, type: 'error', profileId: profile.id });
+      io.to(room).emit('docker:exit', { action: act, code: -1, error: err.message, profileId: profile.id });
       reject(err);
     });
   });
 }
 
-// Mata el proceso adjunto (p.ej. `up` en primer plano). Los contenedores
-// pueden quedar vivos → usar la acción "down" para limpiarlos del todo.
-function stop(io) {
-  if (!currentProc) return false;
+// Mata el proceso adjunto de ESTE perfil.
+function stop(io, profile) {
+  const s = _state(profile.id);
+  if (!s.currentProc) return false;
   try {
     if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(currentProc.pid), '/f', '/t'], { shell: true });
+      spawn('taskkill', ['/pid', String(s.currentProc.pid), '/f', '/t'], { shell: true });
     } else {
-      currentProc.kill('SIGTERM');
+      s.currentProc.kill('SIGTERM');
     }
-    if (io) io.emit('docker:log', { message: 'Deteniendo proceso Docker...', type: 'error' });
+    if (io) io.to(`profile:${profile.id}`).emit('docker:log', { message: 'Deteniendo proceso Docker...', type: 'error', profileId: profile.id });
     return true;
   } catch {
     return false;
   }
 }
 
-// Garantiza que el grid Selenium esté arriba y saludable antes de correr tests.
-// Idempotente: si ya está sano, `up -d --wait` vuelve enseguida. Lanza error
-// claro si Docker Desktop está cerrado o el grid no levanta.
-function ensureGrid(io) {
+// Garantiza que el grid Selenium del perfil esté arriba y saludable.
+function ensureGrid(io, profile) {
   return new Promise((resolve, reject) => {
-    const projectPath = readProjectPath();
+    const projectPath = readProjectPath(profile);
     if (!projectPath || !fs.existsSync(projectPath)) {
       return reject(new Error('projectPath no configurado o inexistente.'));
     }
@@ -215,8 +219,9 @@ function ensureGrid(io) {
       return reject(new Error('No se encontró docker-compose.yml en el proyecto.'));
     }
 
-    const emit = (message, type = 'info') => io && io.emit('docker:log', { message, type });
-    const args = ['compose', 'up', '-d', '--wait', 'selenium'];
+    const room = `profile:${profile.id}`;
+    const emit = (message, type = 'info') => io && io.to(room).emit('docker:log', { message, type, profileId: profile.id });
+    const args = composeArgs(profile, ['up', '-d', '--wait', 'selenium']);
     emit(`$ docker ${args.join(' ')}  (cwd: ${projectPath})`, 'cmd');
 
     const proc = spawn('docker', args, { cwd: projectPath, shell: process.platform === 'win32' });
@@ -247,9 +252,6 @@ function ensureGrid(io) {
   });
 }
 
-// Arranca Docker Desktop y espera a que el daemon responda. Útil cuando el
-// binario está instalado pero el engine está apagado (causa típica del error
-// "dockerDesktopLinuxEngine: cannot find file").
 function dockerDaemonUp() {
   return new Promise(resolve => {
     exec('docker info --format "{{.ServerVersion}}"', (err) => resolve(!err));
@@ -264,7 +266,6 @@ async function startDockerDesktop(io) {
     return { ready: true };
   }
 
-  // Lanzar la app según plataforma.
   if (process.platform === 'win32') {
     const candidates = [
       'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe',
@@ -281,7 +282,6 @@ async function startDockerDesktop(io) {
     return { ready: false, error: 'Arranque automático no soportado en este SO. Inicia el daemon manualmente.' };
   }
 
-  // Poll hasta ~120s (engine tarda en levantar la primera vez).
   emit('Esperando a que el engine de Docker responda...', 'info');
   for (let i = 0; i < 40; i++) {
     await new Promise(r => setTimeout(r, 3000));
@@ -293,4 +293,4 @@ async function startDockerDesktop(io) {
   return { ready: false, error: 'Docker Desktop no respondió tras 2 minutos. Ábrelo manualmente y reintenta.' };
 }
 
-module.exports = { run, stop, status, gridStatus, projectStatus, listContainers, isRunning, checkDocker, ensureGrid, startDockerDesktop, readProjectPath };
+module.exports = { run, stop, status, gridStatus, projectStatus, listContainers, isRunning, checkDocker, ensureGrid, startDockerDesktop, readProjectPath, projectName };

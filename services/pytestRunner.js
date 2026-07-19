@@ -1,25 +1,33 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const runtime = require('./runtimeRegistry');
 
-const REPORTS_DIR = path.join(__dirname, '..', 'reports');
+const DEFAULT_REPORTS_DIR = path.join(__dirname, '..', 'reports');
 
-let currentProc = null;
-let running = false;
-let aborted = false;
+// Estado por perfil: cada perfil corre en paralelo sin pisar al otro.
+const state = new Map(); // profileId -> { running, currentProc, aborted }
 
-function isRunning() {
-  return running;
+function _state(profileId) {
+  if (!state.has(profileId)) state.set(profileId, { running: false, currentProc: null, aborted: false });
+  return state.get(profileId);
 }
 
-function abortExecution() {
-  aborted = true;
-  if (currentProc) {
+function isRunning(profileId) {
+  const s = state.get(profileId);
+  return !!(s && s.running);
+}
+
+function abortExecution(profileId) {
+  const s = state.get(profileId);
+  if (!s) return;
+  s.aborted = true;
+  if (s.currentProc) {
     try {
       if (process.platform === 'win32') {
-        spawn('taskkill', ['/pid', String(currentProc.pid), '/f', '/t'], { shell: true });
+        spawn('taskkill', ['/pid', String(s.currentProc.pid), '/f', '/t'], { shell: true });
       } else {
-        currentProc.kill('SIGTERM');
+        s.currentProc.kill('SIGTERM');
       }
     } catch {
       // Process may have already exited
@@ -27,32 +35,39 @@ function abortExecution() {
   }
 }
 
-async function runTests(io, testIds, projectPath, pytestCmd = 'pytest', envVars = {}, paramsByTest = {}) {
-  running = true;
-  aborted = false;
-  currentProc = null;
+// Emite un evento solo a la sala del perfil (aislamiento de logs en paralelo).
+function emit(io, profileId, event, payload) {
+  if (io) io.to(`profile:${profileId}`).emit(event, { ...payload, profileId });
+}
+
+async function runTests(io, profileId, testIds, projectPath, pytestCmd = 'pytest', envVars = {}, paramsByTest = {}, reportsDir = DEFAULT_REPORTS_DIR) {
+  const s = _state(profileId);
+  s.running = true;
+  s.aborted = false;
+  s.currentProc = null;
+  runtime.start(io, profileId, 'tests');
 
   const startTime = Date.now();
   const results = [];
 
-  io.emit('execution:started', { total: testIds.length });
+  emit(io, profileId, 'execution:started', { total: testIds.length });
 
   for (let i = 0; i < testIds.length; i++) {
-    if (aborted) {
-      io.emit('execution:aborted', { completed: i, total: testIds.length });
+    if (s.aborted) {
+      emit(io, profileId, 'execution:aborted', { completed: i, total: testIds.length });
       break;
     }
 
     const testId = testIds[i];
-    io.emit('test:started', { id: testId, index: i, total: testIds.length });
+    emit(io, profileId, 'test:started', { id: testId, index: i, total: testIds.length });
 
     // Params específicos de este test pisan a los globales.
     const perTest = paramsByTest[testId] || {};
-    const result = await runSingleTest(io, testId, projectPath, pytestCmd, { ...envVars, ...perTest });
+    const result = await runSingleTest(io, profileId, testId, projectPath, pytestCmd, { ...envVars, ...perTest });
     results.push(result);
 
-    io.emit('test:completed', result);
-    io.emit('progress', {
+    emit(io, profileId, 'test:completed', result);
+    emit(io, profileId, 'progress', {
       current: i + 1,
       total: testIds.length,
       percentage: Math.round(((i + 1) / testIds.length) * 100)
@@ -76,16 +91,17 @@ async function runTests(io, testIds, projectPath, pytestCmd = 'pytest', envVars 
     tests: results
   };
 
-  if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
-  fs.writeFileSync(path.join(REPORTS_DIR, `${reportId}.json`), JSON.stringify(report, null, 2));
+  if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
+  fs.writeFileSync(path.join(reportsDir, `${reportId}.json`), JSON.stringify(report, null, 2));
 
-  io.emit('execution:completed', { reportId, summary });
+  emit(io, profileId, 'execution:completed', { reportId, summary });
 
-  running = false;
-  currentProc = null;
+  s.running = false;
+  s.currentProc = null;
+  runtime.stop(io, profileId, 'tests');
 }
 
-function runSingleTest(io, testId, projectPath, pytestCmd, envVars = {}) {
+function runSingleTest(io, profileId, testId, projectPath, pytestCmd, envVars = {}) {
   return new Promise((resolve) => {
     const testStart = Date.now();
     const cmdParts = pytestCmd.trim().split(/\s+/);
@@ -101,18 +117,18 @@ function runSingleTest(io, testId, projectPath, pytestCmd, envVars = {}) {
       env: { ...process.env, ...envVars }
     });
 
-    currentProc = proc;
+    _state(profileId).currentProc = proc;
 
     proc.stdout.on('data', (data) => {
       const text = data.toString();
       output += text;
-      io.emit('test:output', { id: testId, line: text });
+      emit(io, profileId, 'test:output', { id: testId, line: text });
     });
 
     proc.stderr.on('data', (data) => {
       const text = data.toString();
       output += text;
-      io.emit('test:output', { id: testId, line: text });
+      emit(io, profileId, 'test:output', { id: testId, line: text });
     });
 
     proc.on('close', (code) => {

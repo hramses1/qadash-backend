@@ -1,26 +1,23 @@
 const fs = require('fs');
-const path = require('path');
 const { readEnv } = require('./envManager');
 const { runTests, isRunning } = require('./pytestRunner');
 const { ensureGrid } = require('./dockerRunner');
-
-const SCHED_PATH = path.join(__dirname, '..', 'schedules.json');
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
+const pm = require('./profileManager');
 
 let io = null;
 let lastTickMinute = null;
 
-function load() {
-  try { return JSON.parse(fs.readFileSync(SCHED_PATH, 'utf-8')); }
+function loadFrom(schedPath) {
+  try { return JSON.parse(fs.readFileSync(schedPath, 'utf-8')); }
   catch { return []; }
 }
 
-function save(list) {
-  fs.writeFileSync(SCHED_PATH, JSON.stringify(list, null, 2));
+function saveTo(schedPath, list) {
+  fs.writeFileSync(schedPath, JSON.stringify(list, null, 2));
 }
 
-function getConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); }
+function readConfigAt(configPath) {
+  try { return JSON.parse(fs.readFileSync(configPath, 'utf-8')); }
   catch { return {}; }
 }
 
@@ -44,9 +41,9 @@ function computeNextRun(s, from = new Date()) {
   return null;
 }
 
-function emitLog(message, type = 'info') {
-  if (io) io.emit('schedule:log', { message, type, ts: Date.now() });
-  console.log('[scheduler]', message);
+function emitLog(activeIo, profileId, message, type = 'info') {
+  if (activeIo) activeIo.to(`profile:${profileId}`).emit('schedule:log', { message, type, ts: Date.now(), profileId });
+  console.log('[scheduler]', profileId, message);
 }
 
 // Entorno del subprocess: .env base + grid + params de la programación.
@@ -66,21 +63,23 @@ function buildEnv(cfg, schedule) {
   return env;
 }
 
-// Dispara una programación. manual=true ignora el guard de "ya corriendo"? No:
-// si hay un run en curso, se omite siempre para no pisar la sesión del usuario.
-async function trigger(schedule) {
-  if (isRunning()) {
-    emitLog(`Programación "${schedule.name}" omitida: ya hay una ejecución en curso`, 'error');
+// Dispara una programación de un perfil (paths). Si ese perfil ya corre, se
+// omite (no pisa su sesión), pero OTROS perfiles pueden correr en paralelo.
+async function trigger(schedule, paths, ioOverride) {
+  const activeIo = ioOverride || io;
+  const pid = paths.id;
+  if (isRunning(pid)) {
+    emitLog(activeIo, pid, `Programación "${schedule.name}" omitida: ya hay una ejecución en curso en este perfil`, 'error');
     return { ok: false, reason: 'busy' };
   }
-  const cfg = getConfig();
+  const cfg = readConfigAt(paths.config);
   if (!cfg.projectPath) {
-    emitLog(`Programación "${schedule.name}" sin proyecto configurado`, 'error');
+    emitLog(activeIo, pid, `Programación "${schedule.name}" sin proyecto configurado`, 'error');
     return { ok: false, reason: 'no-project' };
   }
   const base = (schedule.testIds || []).filter(Boolean);
   if (!base.length) {
-    emitLog(`Programación "${schedule.name}" sin tests`, 'error');
+    emitLog(activeIo, pid, `Programación "${schedule.name}" sin tests`, 'error');
     return { ok: false, reason: 'no-tests' };
   }
 
@@ -89,24 +88,25 @@ async function trigger(schedule) {
   const env = buildEnv(cfg, schedule);
 
   if (schedule.useDocker && cfg.seleniumRemoteUrl) {
-    emitLog(`"${schedule.name}": levantando Selenium en Docker...`);
-    try { await ensureGrid(io); }
-    catch (e) { emitLog(`"${schedule.name}": Docker falló — ${e.message}`, 'error'); }
+    emitLog(activeIo, pid, `"${schedule.name}": levantando Selenium en Docker...`);
+    try { await ensureGrid(activeIo, paths); }
+    catch (e) { emitLog(activeIo, pid, `"${schedule.name}": Docker falló — ${e.message}`, 'error'); }
   }
 
   // Sella lastRun.
-  const list = load();
+  const list = loadFrom(paths.schedules);
   const item = list.find(x => x.id === schedule.id);
-  if (item) { item.lastRun = new Date().toISOString(); save(list); }
+  if (item) { item.lastRun = new Date().toISOString(); saveTo(paths.schedules, list); }
 
-  emitLog(`▶ Ejecutando programación "${schedule.name}" (${testIds.length} test${testIds.length !== 1 ? 's' : ''})`, 'success');
-  if (io) io.emit('schedule:run', { id: schedule.id, name: schedule.name, total: testIds.length });
+  emitLog(activeIo, pid, `▶ Ejecutando programación "${schedule.name}" (${testIds.length} test${testIds.length !== 1 ? 's' : ''})`, 'success');
+  if (activeIo) activeIo.to(`profile:${pid}`).emit('schedule:run', { id: schedule.id, name: schedule.name, total: testIds.length, profileId: pid });
 
-  runTests(io, testIds, cfg.projectPath, cfg.pytestCmd, env, schedule.paramsByTest || {});
+  runTests(activeIo, pid, testIds, cfg.projectPath, cfg.pytestCmd, env, schedule.paramsByTest || {}, paths.reportsDir);
   return { ok: true };
 }
 
-// Tick: una vez por minuto, lanza las programaciones cuyo HH:MM y día coinciden.
+// Tick: una vez por minuto, recorre TODOS los perfiles y lanza las
+// programaciones cuyo HH:MM y día coinciden. Perfiles corren en paralelo.
 function tick() {
   const now = new Date();
   const minuteKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
@@ -115,10 +115,13 @@ function tick() {
 
   const hhmm = now.toTimeString().slice(0, 5);
   const dow = now.getDay();
-  for (const s of load()) {
-    if (!s.enabled || s.time !== hhmm) continue;
-    if (s.days && s.days.length && !s.days.includes(dow)) continue;
-    trigger(s);
+  for (const prof of pm.listProfiles()) {
+    const paths = pm.profilePaths(prof.id);
+    for (const s of loadFrom(paths.schedules)) {
+      if (!s.enabled || s.time !== hhmm) continue;
+      if (s.days && s.days.length && !s.days.includes(dow)) continue;
+      trigger(s, paths);
+    }
   }
 }
 
@@ -129,4 +132,4 @@ function start(_io) {
   console.log('[scheduler] iniciado');
 }
 
-module.exports = { load, save, getConfig, uid, computeNextRun, trigger, start };
+module.exports = { loadFrom, saveTo, uid, computeNextRun, trigger, start };

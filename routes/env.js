@@ -4,10 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { readEnv, writeEnv } = require('../services/envManager');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
-
-function getConfig() {
-  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+function getConfig(req) {
+  return JSON.parse(fs.readFileSync(req.profile.config, 'utf-8'));
 }
 
 function resolveEnvPath(file, projectPath, fallbackEnvPath) {
@@ -19,7 +17,7 @@ function resolveEnvPath(file, projectPath, fallbackEnvPath) {
 
 router.get('/files', (req, res) => {
   try {
-    const { projectPath } = getConfig();
+    const { projectPath } = getConfig(req);
     if (!projectPath || !fs.existsSync(projectPath)) return res.json({ files: [] });
     const files = fs.readdirSync(projectPath)
       .filter(f => /^\.env(\..+)?$/.test(f) && f !== '.env.example')
@@ -32,7 +30,7 @@ router.get('/files', (req, res) => {
 
 router.get('/', (req, res) => {
   try {
-    const { projectPath, envPath } = getConfig();
+    const { projectPath, envPath } = getConfig(req);
     const targetPath = resolveEnvPath(req.query.file, projectPath, envPath);
     if (!targetPath) return res.status(400).json({ error: 'Env path not configured' });
     if (!fs.existsSync(targetPath)) return res.status(404).json({ error: 'Env file not found', path: targetPath });
@@ -46,7 +44,7 @@ router.get('/', (req, res) => {
 router.post('/', (req, res) => {
   try {
     const { vars } = req.body;
-    const { projectPath, envPath } = getConfig();
+    const { projectPath, envPath } = getConfig(req);
     const targetPath = resolveEnvPath(req.query.file, projectPath, envPath);
     if (!targetPath) return res.status(400).json({ error: 'Env path not configured' });
     writeEnv(targetPath, vars);

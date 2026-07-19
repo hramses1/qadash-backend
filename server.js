@@ -2,9 +2,8 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
 const requireFeature = require('./middleware/requireFeature');
+const resolveProfile = require('./middleware/resolveProfile');
 
 const app = express();
 const server = http.createServer(app);
@@ -15,27 +14,23 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// ── Ensure all required dirs/files exist on every startup ──────────
-const DIRS = ['reports', 'data', 'profiles'];
-DIRS.forEach(d => {
-  const p = path.join(__dirname, d);
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
-});
-
-const configPath = path.join(__dirname, 'config.json');
-if (!fs.existsSync(configPath)) {
-  fs.writeFileSync(configPath, JSON.stringify({
-    projectPath: '', envPath: '', pytestCmd: 'pytest',
-    installPath: '', repoUrl: ''
-  }, null, 2));
-}
-
-const profilesPath = path.join(__dirname, 'profiles.json');
-if (!fs.existsSync(profilesPath)) {
-  fs.writeFileSync(profilesPath, JSON.stringify({}, null, 2));
+// ── Migración y bootstrap de perfiles ──────────────────────────────
+const { migrateIfNeeded } = require('./services/profileMigration');
+const pm = require('./services/profileManager');
+const migRes = migrateIfNeeded();
+if (migRes.migrated) console.log('[profiles] migrado config global ->', migRes.id);
+if (pm.listProfiles().length === 0) {
+  const p = pm.createProfile('Perfil 1');
+  console.log('[profiles] creado perfil inicial', p.id);
 }
 
 app.set('io', io);
+
+// Gestión de perfiles: NO pasa por resolveProfile (opera sobre perfiles en sí).
+app.use('/api/profile-admin', require('./routes/profileAdmin'));
+
+// Todas las demás rutas de /api resuelven el perfil del request.
+app.use('/api', resolveProfile);
 
 app.use('/api/config', require('./routes/config'));
 app.use('/api/tests', require('./routes/tests'));
@@ -52,6 +47,9 @@ app.use('/api/errors', requireFeature('errorImages'), require('./routes/errors')
 
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
+  // El cliente se une a la sala del/los perfil(es) que quiere monitorear.
+  socket.on('profile:join', (id) => { if (id) socket.join(`profile:${id}`); });
+  socket.on('profile:leave', (id) => { if (id) socket.leave(`profile:${id}`); });
   socket.on('disconnect', () => console.log('Client disconnected:', socket.id));
 });
 

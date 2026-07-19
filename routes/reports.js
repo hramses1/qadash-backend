@@ -3,10 +3,9 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 
-const REPORTS_DIR = path.join(__dirname, '..', 'reports');
-
 router.get('/', (req, res) => {
   try {
+    const REPORTS_DIR = req.profile.reportsDir;
     if (!fs.existsSync(REPORTS_DIR)) return res.json([]);
     const files = fs.readdirSync(REPORTS_DIR)
       .filter(f => f.endsWith('.json'))
@@ -28,8 +27,9 @@ router.get('/', (req, res) => {
 
 router.get('/analytics', (req, res) => {
   try {
+    const REPORTS_DIR = req.profile.reportsDir;
     // ── Load last test collection (may not exist if user never clicked Actualizar Tests) ──
-    const COLLECTION_PATH = path.join(__dirname, '..', 'data', 'last-collection.json');
+    const COLLECTION_PATH = req.profile.collection;
     let totalAvailable = null;
     const collectionByFile = {};  // fileName → available count
 
@@ -154,7 +154,7 @@ router.get('/analytics', (req, res) => {
 
 router.get('/:id', (req, res) => {
   try {
-    const filePath = path.join(REPORTS_DIR, `${req.params.id}.json`);
+    const filePath = path.join(req.profile.reportsDir, `${req.params.id}.json`);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Report not found' });
     res.json(JSON.parse(fs.readFileSync(filePath, 'utf-8')));
   } catch (e) {
@@ -163,14 +163,14 @@ router.get('/:id', (req, res) => {
 });
 
 router.get('/:id/download/json', (req, res) => {
-  const filePath = path.join(REPORTS_DIR, `${req.params.id}.json`);
+  const filePath = path.join(req.profile.reportsDir, `${req.params.id}.json`);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Report not found' });
   res.download(filePath);
 });
 
 router.get('/:id/download/html', (req, res) => {
   try {
-    const filePath = path.join(REPORTS_DIR, `${req.params.id}.json`);
+    const filePath = path.join(req.profile.reportsDir, `${req.params.id}.json`);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Report not found' });
     const report = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     res.setHeader('Content-Type', 'text/html');
@@ -182,7 +182,7 @@ router.get('/:id/download/html', (req, res) => {
 
 router.delete('/:id', (req, res) => {
   try {
-    const filePath = path.join(REPORTS_DIR, `${req.params.id}.json`);
+    const filePath = path.join(req.profile.reportsDir, `${req.params.id}.json`);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Report not found' });
     fs.unlinkSync(filePath);
     res.json({ success: true });

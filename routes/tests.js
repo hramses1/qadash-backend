@@ -5,18 +5,16 @@ const path = require('path');
 const { collectTests } = require('../services/testCollector');
 const { runTests, abortExecution, isRunning } = require('../services/pytestRunner');
 const { readEnv } = require('../services/envManager');
-const { getProfile } = require('../services/profileManager');
+const { getEntorno } = require('../services/profileManager');
 const { ensureGrid } = require('../services/dockerRunner');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
-
-function getConfig() {
-  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+function getConfig(req) {
+  return JSON.parse(fs.readFileSync(req.profile.config, 'utf-8'));
 }
 
-function resolveEnvVars(profileName, envFile, projectPath) {
-  if (profileName) {
-    const vars = getProfile(profileName);
+function resolveEnvVars(req, entornoName, envFile, projectPath) {
+  if (entornoName) {
+    const vars = getEntorno(req.profile.entornos, entornoName);
     if (vars) return Object.fromEntries(vars.filter(v => !v.isComment && v.key).map(v => [v.key, v.value]));
   }
   if (envFile && projectPath) {
@@ -32,7 +30,7 @@ function resolveEnvVars(profileName, envFile, projectPath) {
 
 // Returns last collection from disk (fast — no pytest re-run)
 router.get('/cached', (req, res) => {
-  const cachePath = path.join(__dirname, '..', 'data', 'last-collection.json');
+  const cachePath = req.profile.collection;
   if (!fs.existsSync(cachePath)) return res.json({ files: {}, total: 0, timestamp: null });
   try {
     res.json(JSON.parse(fs.readFileSync(cachePath, 'utf-8')));
@@ -43,16 +41,16 @@ router.get('/cached', (req, res) => {
 
 router.get('/collect', async (req, res) => {
   try {
-    const { projectPath, pytestCmd } = getConfig();
+    const { projectPath, pytestCmd } = getConfig(req);
     if (!projectPath) return res.status(400).json({ error: 'Project path not configured' });
     const result = await collectTests(projectPath, pytestCmd);
 
     // Persist collection so analytics can cross-reference unexecuted tests
     try {
-      const dataDir = path.join(__dirname, '..', 'data');
+      const dataDir = req.profile.dataDir;
       if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
       fs.writeFileSync(
-        path.join(dataDir, 'last-collection.json'),
+        req.profile.collection,
         JSON.stringify({ timestamp: new Date().toISOString(), files: result.files, total: result.total || 0 }),
         'utf-8'
       );
@@ -66,12 +64,12 @@ router.get('/collect', async (req, res) => {
 
 router.post('/run', async (req, res) => {
   try {
-    if (isRunning()) return res.status(409).json({ error: 'Execution already in progress' });
+    if (isRunning(req.profile.id)) return res.status(409).json({ error: 'Execution already in progress' });
     const { testIds, profileName, envFile, useDocker, params, paramsByTest } = req.body;
     if (!testIds || !testIds.length) return res.status(400).json({ error: 'No tests selected' });
-    const { projectPath, pytestCmd, seleniumRemoteUrl, envPath } = getConfig();
+    const { projectPath, pytestCmd, seleniumRemoteUrl, envPath } = getConfig(req);
     if (!projectPath) return res.status(400).json({ error: 'Project path not configured' });
-    let envVars = resolveEnvVars(profileName, envFile, projectPath);
+    let envVars = resolveEnvVars(req, profileName, envFile, projectPath);
     // Sin perfil/envFile explícito: usa el .env configurado como base, así los
     // params vacíos del modal caen al valor real del .env del proyecto.
     if (Object.keys(envVars).length === 0 && envPath && fs.existsSync(envPath)) {
@@ -96,11 +94,11 @@ router.post('/run', async (req, res) => {
     // Docker: si se pidió, levanta el grid Selenium y espera healthcheck ANTES de
     // correr los tests. Si falla (Docker cerrado, etc.) aborta con error claro.
     if (useDocker && seleniumRemoteUrl) {
-      io.emit('execution:preparing', { message: 'Iniciando Selenium en Docker (esperando healthcheck)...' });
+      io.to(`profile:${req.profile.id}`).emit('execution:preparing', { message: 'Iniciando Selenium en Docker (esperando healthcheck)...' });
       try {
-        await ensureGrid(io);
+        await ensureGrid(io, req.profile);
       } catch (e) {
-        io.emit('execution:prepare-failed', { error: e.message });
+        io.to(`profile:${req.profile.id}`).emit('execution:prepare-failed', { error: e.message });
         return res.status(500).json({ error: e.message });
       }
     }
@@ -118,7 +116,7 @@ router.post('/run', async (req, res) => {
       }
     }
 
-    runTests(io, testIds, projectPath, pytestCmd, envVars, cleanPerTest);
+    runTests(io, req.profile.id, testIds, projectPath, pytestCmd, envVars, cleanPerTest, req.profile.reportsDir);
     res.json({ success: true, message: `Starting ${testIds.length} tests sequentially` });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -126,19 +124,19 @@ router.post('/run', async (req, res) => {
 });
 
 router.post('/abort', (req, res) => {
-  abortExecution();
+  abortExecution(req.profile.id);
   res.json({ success: true });
 });
 
 router.get('/status', (req, res) => {
-  res.json({ running: isRunning() });
+  res.json({ running: isRunning(req.profile.id) });
 });
 
 router.get('/file', (req, res) => {
   try {
     const { name } = req.query;
     if (!name) return res.status(400).json({ error: 'name requerido' });
-    const { projectPath } = getConfig();
+    const { projectPath } = getConfig(req);
     if (!projectPath) return res.status(400).json({ error: 'Proyecto no configurado' });
 
     const filePath = path.resolve(projectPath, name);
@@ -161,7 +159,7 @@ router.post('/file', (req, res) => {
     if (!name) return res.status(400).json({ error: 'name requerido' });
     if (content === undefined || content === null) return res.status(400).json({ error: 'content requerido' });
 
-    const { projectPath } = getConfig();
+    const { projectPath } = getConfig(req);
     if (!projectPath) return res.status(400).json({ error: 'Proyecto no configurado' });
 
     const filePath = path.resolve(projectPath, name);
