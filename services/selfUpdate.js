@@ -56,7 +56,7 @@ async function repoStatus(repo) {
     // Los archivos sin rastrear no impiden un fast-forward; solo los rastreados
     // con cambios locales, que git se negaría a pisar.
     const dirty = dirtyOut.split('\n').filter(l => l.trim() && !l.startsWith('??'));
-    const head = await sh('git log -1 --format=%h %s', repo.dir).catch(() => '');
+    const head = await sh('git log -1 --format="%h %s"', repo.dir).catch(() => '');
     return { ...base, ok: true, branch, behind, ahead, dirty: dirty.length, head };
   } catch (e) {
     return { ...base, ok: false, error: e.message };
@@ -100,7 +100,7 @@ async function updateRepo(repo, emit) {
     emit(`${repo.label}: dependencias instaladas`, 'info');
   }
 
-  const head = await sh('git log -1 --format=%h %s', repo.dir).catch(() => '');
+  const head = await sh('git log -1 --format="%h %s"', repo.dir).catch(() => '');
   emit(`${repo.label}: actualizado → ${head}`, 'success');
   return { key: repo.key, updated: true, installed: needsInstall };
 }
