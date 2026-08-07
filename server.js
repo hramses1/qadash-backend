@@ -29,6 +29,10 @@ app.set('io', io);
 // Gestión de perfiles: NO pasa por resolveProfile (opera sobre perfiles en sí).
 app.use('/api/profile-admin', require('./routes/profileAdmin'));
 
+// Actualización del propio dashboard: opera sobre los repos, no sobre un
+// perfil, así que va antes de resolveProfile igual que profile-admin.
+app.use('/api/system', require('./routes/system'));
+
 // Todas las demás rutas de /api resuelven el perfil del request.
 app.use('/api', resolveProfile);
 
