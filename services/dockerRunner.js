@@ -2,6 +2,10 @@ const { spawn, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const runtime = require('./runtimeRegistry');
+const {
+  IS_WIN, IS_MAC, DOCKER_APP, INSTALL_HINT, RUNNING_QUESTION, GROUP_HINT,
+  isSocketPermissionError, dockerFailHint,
+} = require('./dockerEnv');
 
 // Estado por perfil: cada perfil corre compose en paralelo con nombre de
 // proyecto namespaced (`-p qadash-<id>`) para no pisar contenedores de otro.
@@ -94,20 +98,26 @@ function gridStatus(profile) {
 function checkDocker() {
   return new Promise((resolve) => {
     const shell = process.platform === 'win32';
+    const notFound = `Docker no encontrado. ${INSTALL_HINT}`;
     const ver = spawn('docker', ['--version'], { shell });
     let out = '';
     ver.stdout.on('data', d => { out += d.toString(); });
-    ver.on('error', () => resolve({ ok: false, error: 'Docker no encontrado. Instala Docker Desktop.' }));
+    ver.on('error', () => resolve({ ok: false, error: notFound }));
     ver.on('close', code => {
-      if (code !== 0) return resolve({ ok: false, error: 'Docker no encontrado. Instala Docker Desktop.' });
+      if (code !== 0) return resolve({ ok: false, error: notFound });
       const version = out.trim();
       const info = spawn('docker', ['info', '--format', '{{.ServerVersion}}'], { shell });
       let derr = '';
       info.stderr.on('data', d => { derr += d.toString(); });
-      info.on('error', () => resolve({ ok: false, version, error: 'Docker instalado pero el daemon no responde. Abre Docker Desktop.' }));
+      info.on('error', () => resolve({ ok: false, version, error: `Docker instalado pero el daemon no responde. ${RUNNING_QUESTION}` }));
       info.on('close', c => {
-        if (c === 0) resolve({ ok: true, version });
-        else resolve({ ok: false, version, error: 'Docker Desktop no está corriendo. Ábrelo y reintenta.' });
+        if (c === 0) return resolve({ ok: true, version });
+        // El daemon puede estar arriba y aun asi fallar por permisos de socket:
+        // distinguirlo evita mandar al usuario a "arrancar" algo ya arrancado.
+        if (isSocketPermissionError(derr)) {
+          return resolve({ ok: false, version, permission: true, error: GROUP_HINT });
+        }
+        resolve({ ok: false, version, error: `${DOCKER_APP} no está corriendo. Arráncalo y reintenta.` });
       });
     });
   });
@@ -123,10 +133,15 @@ function listContainers() {
     let out = '', err = '';
     proc.stdout.on('data', d => { out += d.toString(); });
     proc.stderr.on('data', d => { err += d.toString(); });
-    proc.on('error', () => resolve({ ok: false, error: 'Docker no disponible. ¿Docker Desktop está abierto?', containers: [] }));
+    proc.on('error', () => resolve({ ok: false, error: `Docker no disponible. ${RUNNING_QUESTION}`, containers: [] }));
     proc.on('close', code => {
       if (code !== 0) {
-        return resolve({ ok: false, error: err.trim() || 'docker ps falló', containers: [] });
+        const detail = err.trim();
+        return resolve({
+          ok: false,
+          error: isSocketPermissionError(detail) ? GROUP_HINT : (detail || 'docker ps falló'),
+          containers: [],
+        });
       }
       const containers = out.split('\n').map(l => l.trimEnd()).filter(Boolean).map(line => {
         const [name, image, status, ports] = line.split(SEP);
@@ -164,9 +179,13 @@ function run(io, profile, action) {
 
     const proc = spawn('docker', args, { cwd: projectPath, shell: process.platform === 'win32' });
     s.currentProc = proc;
+    let errBuf = '';
 
     proc.stdout.on('data', d => d.toString().split('\n').forEach(l => { if (l.trim()) emit(l.trim()); }));
-    proc.stderr.on('data', d => d.toString().split('\n').forEach(l => { if (l.trim()) emit(l.trim()); }));
+    proc.stderr.on('data', d => {
+      errBuf += d.toString();
+      d.toString().split('\n').forEach(l => { if (l.trim()) emit(l.trim()); });
+    });
 
     proc.on('close', code => {
       const act = s.currentAction;
@@ -174,6 +193,9 @@ function run(io, profile, action) {
       s.currentProc = null;
       s.currentAction = null;
       runtime.stop(io, profile.id, 'docker');
+      // Al fallar, la salida cruda de docker no dice qué hacer: añadimos la
+      // pista accionable (permisos de socket vs daemon apagado).
+      if (code !== 0) emit(dockerFailHint(errBuf), 'error');
       io.to(room).emit('docker:exit', { action: act, code, profileId: profile.id });
       resolve({ code });
     });
@@ -235,7 +257,7 @@ function ensureGrid(io, profile) {
     });
 
     proc.on('error', err => {
-      reject(new Error(`No se pudo ejecutar Docker: ${err.message}. ¿Docker Desktop está abierto?`));
+      reject(new Error(`No se pudo ejecutar Docker: ${err.message}. ${RUNNING_QUESTION}`));
     });
     proc.on('close', code => {
       if (code === 0) {
@@ -245,28 +267,62 @@ function ensureGrid(io, profile) {
         const tail = errBuf.trim().slice(-300);
         reject(new Error(
           `No se pudo iniciar el grid Selenium en Docker (código ${code}). ` +
-          `¿Docker Desktop está abierto?${tail ? ' — ' + tail : ''}`
+          `${dockerFailHint(errBuf)}${tail ? ' — ' + tail : ''}`
         ));
       }
     });
   });
 }
 
-function dockerDaemonUp() {
+// `docker info` falla por dos motivos muy distintos: el daemon está caído, o
+// está arriba pero no tenemos permiso sobre el socket. Los separamos porque la
+// acción a tomar no es la misma.
+function dockerDaemonState() {
   return new Promise(resolve => {
-    exec('docker info --format "{{.ServerVersion}}"', (err) => resolve(!err));
+    exec('docker info --format "{{.ServerVersion}}"', (err, _stdout, stderr) => {
+      if (!err) return resolve({ up: true });
+      const detail = `${stderr || ''}${err.message || ''}`;
+      resolve({ up: false, permission: isSocketPermissionError(detail), detail: detail.trim() });
+    });
   });
 }
 
+// Linux: no hay Docker Desktop, dockerd es un servicio de systemd. Usamos
+// `sudo -n` a propósito: sin NOPASSWD el sudo se quedaría esperando una
+// contraseña que nadie va a teclear y colgaría la petición HTTP.
+function startLinuxDaemon() {
+  return new Promise(resolve => {
+    exec('systemctl is-active docker', (activeErr, activeOut) => {
+      if (!activeErr && String(activeOut).trim() === 'active') return resolve({ ok: true });
+      exec('sudo -n systemctl start docker', (err, _out, stderr) => {
+        if (!err) return resolve({ ok: true });
+        const tail = String(stderr || '').trim().slice(-200);
+        resolve({
+          ok: false,
+          error: 'No se pudo arrancar el daemon de Docker automáticamente (hace falta sudo sin contraseña). ' +
+                 'Arráncalo a mano con: sudo systemctl start docker' + (tail ? ` — ${tail}` : ''),
+        });
+      });
+    });
+  });
+}
+
+// Arranca Docker: Docker Desktop en Windows/macOS, el servicio dockerd en Linux.
 async function startDockerDesktop(io) {
   const emit = (message, type = 'info') => io && io.emit('docker:log', { message, type });
 
-  if (await dockerDaemonUp()) {
+  const st = await dockerDaemonState();
+  if (st.up) {
     emit('Docker ya está corriendo', 'success');
     return { ready: true };
   }
+  // Daemon vivo pero socket sin permiso: volver a arrancarlo no arregla nada.
+  if (st.permission) {
+    emit(GROUP_HINT, 'error');
+    return { ready: false, error: GROUP_HINT };
+  }
 
-  if (process.platform === 'win32') {
+  if (IS_WIN) {
     const candidates = [
       'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe',
       'C:\\Program Files\\Docker\\Docker\\frontend\\Docker Desktop.exe',
@@ -275,22 +331,32 @@ async function startDockerDesktop(io) {
     if (!exe) return { ready: false, error: 'No se encontró Docker Desktop.exe. Instala Docker Desktop.' };
     emit('Arrancando Docker Desktop...', 'cmd');
     spawn('cmd', ['/c', 'start', '', exe], { detached: true, stdio: 'ignore' }).unref();
-  } else if (process.platform === 'darwin') {
+  } else if (IS_MAC) {
     emit('Arrancando Docker Desktop...', 'cmd');
     spawn('open', ['-a', 'Docker'], { detached: true, stdio: 'ignore' }).unref();
   } else {
-    return { ready: false, error: 'Arranque automático no soportado en este SO. Inicia el daemon manualmente.' };
+    emit('Arrancando el daemon de Docker (systemctl start docker)...', 'cmd');
+    const started = await startLinuxDaemon();
+    if (!started.ok) {
+      emit(started.error, 'error');
+      return { ready: false, error: started.error };
+    }
   }
 
   emit('Esperando a que el engine de Docker responda...', 'info');
   for (let i = 0; i < 40; i++) {
     await new Promise(r => setTimeout(r, 3000));
-    if (await dockerDaemonUp()) {
-      emit('Docker Desktop listo', 'success');
+    const s = await dockerDaemonState();
+    if (s.up) {
+      emit(`${DOCKER_APP} listo`, 'success');
       return { ready: true };
     }
+    if (s.permission) {
+      emit(GROUP_HINT, 'error');
+      return { ready: false, error: GROUP_HINT };
+    }
   }
-  return { ready: false, error: 'Docker Desktop no respondió tras 2 minutos. Ábrelo manualmente y reintenta.' };
+  return { ready: false, error: `${DOCKER_APP} no respondió tras 2 minutos. Arráncalo manualmente y reintenta.` };
 }
 
 module.exports = { run, stop, status, gridStatus, projectStatus, listContainers, isRunning, checkDocker, ensureGrid, startDockerDesktop, readProjectPath, projectName };

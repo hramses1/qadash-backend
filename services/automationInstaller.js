@@ -1,6 +1,7 @@
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { DOCKER_APP, INSTALL_HINT, GROUP_HINT, isSocketPermissionError } = require('./dockerEnv');
 
 function checkPython() {
   for (const cmd of ['python', 'python3']) {
@@ -99,8 +100,9 @@ function getRemoteOrigin(repoPath) {
   }
 }
 
-// Docker: binario + daemon. Distingue "no instalado" de "instalado pero
-// Docker Desktop apagado" (este último es accionable → botón para arrancarlo).
+// Docker: binario + daemon. Distingue tres casos, cada uno con una acción
+// distinta: no instalado, daemon apagado (accionable → botón para arrancarlo) y
+// —típico en Linux— daemon vivo pero sin permiso sobre el socket.
 function checkDocker() {
   let version = null;
   try {
@@ -108,13 +110,19 @@ function checkDocker() {
     const m = (out + '').match(/Docker version ([\d.]+)/);
     version = m ? m[1] : 'instalado';
   } catch {
-    return { ok: false, installed: false, daemonRunning: false, error: 'Docker no encontrado. Instala Docker Desktop.' };
+    return { ok: false, installed: false, daemonRunning: false, error: `Docker no encontrado. ${INSTALL_HINT}` };
   }
   try {
     execSync('docker info --format "{{.ServerVersion}}"', { encoding: 'utf-8', stdio: 'pipe' });
     return { ok: true, installed: true, daemonRunning: true, version };
-  } catch {
-    return { ok: false, installed: true, daemonRunning: false, version, error: 'Docker instalado, pero Docker Desktop no está corriendo. Ábrelo.' };
+  } catch (e) {
+    const detail = `${(e && e.stderr) || ''}${(e && e.message) || ''}`;
+    if (isSocketPermissionError(detail)) {
+      // El daemon responde, somos nosotros los que no podemos hablarle:
+      // arrancarlo otra vez no sirve de nada.
+      return { ok: false, installed: true, daemonRunning: true, permission: true, version, error: GROUP_HINT };
+    }
+    return { ok: false, installed: true, daemonRunning: false, version, error: `Docker instalado, pero ${DOCKER_APP} no está corriendo.` };
   }
 }
 
@@ -125,7 +133,9 @@ function checkAll() {
     ? checkVirtualenv(python.cmd)
     : { ok: false, error: 'Requiere Python primero' };
   const docker = checkDocker();
-  return { python, git, venv, docker };
+  // El front necesita el SO del servidor (no el del navegador) para sugerir
+  // rutas: venv/bin/pytest en Linux/macOS vs venv\Scripts\pytest.exe en Windows.
+  return { python, git, venv, docker, platform: process.platform };
 }
 
 // Con shell:true en Windows los argumentos se re-parsean por cmd.exe; las rutas
