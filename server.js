@@ -49,6 +49,13 @@ app.use('/api/docker', requireFeature('docker'), require('./routes/docker'));
 app.use('/api/schedules', requireFeature('schedules'), require('./routes/schedules'));
 app.use('/api/errors', requireFeature('errorImages'), require('./routes/errors'));
 
+// Proxy del noVNC: antes del fallback de SPA, que si no se lo tragaria.
+require('./middleware/novncProxy')(app, server);
+
+// Despues de todas las rutas /api: el fallback de SPA responde a cualquier GET
+// que no sea /api ni /socket.io, asi que registrarlo antes se tragaria la API.
+require('./middleware/serveFrontend')(app);
+
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
   // El cliente se une a la sala del/los perfil(es) que quiere monitorear.
